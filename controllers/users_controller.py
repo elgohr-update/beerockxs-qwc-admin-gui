@@ -9,33 +9,15 @@ from forms import UserForm
 class UsersController(Controller):
     """Controller for user model"""
 
-    def __init__(self, app, config_models):
+    def __init__(self, app, handler):
         """Constructor
 
         :param Flask app: Flask application
-        :param ConfigModels config_models: Helper for ORM models
+        :param handler: Tenant config handler
         """
         super(UsersController, self).__init__(
-            "User", 'users', 'user', 'users', app, config_models
+            "User", 'users', 'user', 'users', app, handler
         )
-        self.User = self.config_models.model('users')
-        self.UserInfo = self.config_models.model('user_infos')
-        self.Group = self.config_models.model('groups')
-        self.Role = self.config_models.model('roles')
-
-        # get custom user info fields
-        try:
-            user_info_fields = json.loads(
-                os.environ.get('USER_INFO_FIELDS', '[]')
-            )
-        except Exception as e:
-            app.logger.error("Could not load USER_INFO_FIELDS:\n%s" % e)
-            user_info_fields = []
-
-        # show TOTP fields?
-        self.totp_enabled = os.environ.get('TOTP_ENABLED', 'False') == 'True'
-
-        UserForm.add_custom_fields(user_info_fields)
 
     def resources_for_index_query(self, search_text, session):
         """Return query for users list.
@@ -82,9 +64,22 @@ class UsersController(Controller):
         :param object resource: Optional user object
         :param bool edit_form: Set if edit form
         """
-        form = UserForm(self.config_models, obj=resource)
 
-        form.totp_enabled = self.totp_enabled
+        # get custom user info fields
+        # get custom user info fields
+        user_info_fields = self.handler().config().get(
+            "user_info_fields", [])
+        # make sure that all python strings
+        # are in double quotes and not single quotes
+        user_info_fields = json.loads(
+            json.dumps(user_info_fields)
+        )
+
+        form = UserForm(self.config_models, user_info_fields, obj=resource)
+
+        # show TOTP fields?
+        form.totp_enabled = self.handler().config().get(
+            "totp_enabled", False)
 
         session = self.session()
         self.update_form_collection(
@@ -123,7 +118,10 @@ class UsersController(Controller):
             user.set_password(form.password.data)
         user.failed_sign_in_count = form.failed_sign_in_count.data or 0
 
-        if self.totp_enabled:
+        totp_enabled = self.handler().config().get(
+            "totp_enabled", False)
+
+        if totp_enabled:
             if form.totp_secret.data:
                 user.totp_secret = form.totp_secret.data
             else:

@@ -21,3 +21,12 @@ body {
   border-top-right-radius: 3px;
   border-bottom-right-radius: 3px;
 }
+
+.search-group {
+  width: 20%;
+}
+
+.hierarchy .item-offset {
+  float: left;
+  width: 3em;
+}

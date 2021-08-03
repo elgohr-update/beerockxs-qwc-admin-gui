@@ -11,28 +11,25 @@ from forms import PermissionForm
 class PermissionsController(Controller):
     """Controller for permission model"""
 
-    def __init__(self, app, config_models):
+    def __init__(self, app, handler):
         """Constructor
 
         :param Flask app: Flask application
-        :param ConfigModels config_models: Helper for ORM models
+        :param handler: Tenant config handler
         """
         super(PermissionsController, self).__init__(
             "Permission", 'permissions', 'permission', 'permissions', app,
-            config_models
+            handler
         )
-        self.Permission = self.config_models.model('permissions')
-        self.Role = self.config_models.model('roles')
-        self.Resource = self.config_models.model('resources')
-        self.ResourceType = self.config_models.model('resource_types')
 
     def resources_for_index_query(self, search_text, role, resource_type,
-                                  session):
+                                  resource_id, session):
         """Return query for permissions list filtered by role or resource type.
 
         :param str search_text: Search string for filtering
         :param str role: Optional role filter
         :param str resource_type: Optional resource type filter
+        :param int resource_id: Optional resource ID filter
         :param Session session: DB session
         """
         query = session.query(self.Permission). \
@@ -51,6 +48,10 @@ class PermissionsController(Controller):
         if resource_type is not None:
             # filter by resource type
             query = query.filter(self.Resource.type == resource_type)
+
+        if resource_id is not None:
+            # filter by resource ID
+            query = query.filter(self.Permission.resource_id == resource_id)
 
         # eager load relations
         query = query.options(
@@ -95,6 +96,7 @@ class PermissionsController(Controller):
 
     def index(self):
         """Show permissions list."""
+        self.setup_models()
 
         session = self.session()
 
@@ -102,8 +104,9 @@ class PermissionsController(Controller):
         search_text = self.search_text_arg()
         role = request.args.get('role')
         active_resource_type = request.args.get('type')
+        resource_id = request.args.get('resource_id')
         query = self.resources_for_index_query(
-            search_text, role, active_resource_type, session
+            search_text, role, active_resource_type, resource_id, session
         )
 
         # order by sort args
@@ -153,13 +156,20 @@ class PermissionsController(Controller):
         for resource_type in query.all():
             resource_types[resource_type.name] = resource_type.description
 
+        # Create dict with all defined parents from resource objects
+        parents_dict = {}
+        for res in resources:
+            if res.resource.parent is not None and \
+                    res.resource.parent.id not in parents_dict.keys():
+                parents_dict[res.resource.parent.id] = res.resource.parent.name
+
         session.close()
 
         return render_template(
             '%s/index.html' % self.templates_dir, resources=resources,
-            endpoint_suffix=self.endpoint_suffix, pkey=self.resource_pkey(),
-            search_text=search_text, pagination=pagination,
-            sort=sort, sort_asc=sort_asc,
+            parents_dict=parents_dict, endpoint_suffix=self.endpoint_suffix,
+            pkey=self.resource_pkey(), search_text=search_text,
+            pagination=pagination, sort=sort, sort_asc=sort_asc,
             base_route=self.base_route, roles=roles, active_role=role,
             resource_types=resource_types,
             active_resource_type=active_resource_type
@@ -204,6 +214,14 @@ class PermissionsController(Controller):
         )
         resources = query.all()
 
+        # This small code is needed to make sure that the parent object
+        # of all resources is called at least once before closing the session.
+        # Doing this allows us to call the parent object even after the session
+        # was closed.
+        for res in resources:
+            if res.parent is not None:
+                res.parent.name
+
         session.close()
 
         # set choices for role select field
@@ -238,7 +256,7 @@ class PermissionsController(Controller):
                 form.resource_choices.append(group)
 
             # add resource to group
-            group['options'].append((r.id, r.name))
+            group['options'].append((r.id, r.name, r.parent))
 
         return form
 

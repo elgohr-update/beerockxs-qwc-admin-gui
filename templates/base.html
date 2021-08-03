@@ -1,6 +1,55 @@
 {% import "bootstrap/utils.html" as utils %}
 {% extends "bootstrap/base.html" %}
 
+{% block scripts %}
+{{super()}}
+<script type="text/javascript">
+  $(function() {
+    $('.btn-spin-on-click').click(function(e) {
+      $(this).attr('disabled', true);
+      // add spinning icon and update button text
+      $(this).html('{{ utils.icon("refresh", ["icon-rotate"]) }} ' + $(this).data('spinning-msg'));
+
+      if ($(this).attr('type') == 'submit') {
+        // submit form
+        e.preventDefault();
+        var form = $(this).closest('form').submit();
+      }
+    });
+  });
+</script>
+<script type="text/javascript">
+  // Idle autologout
+  var idleTimer = null;
+  if({{ config['IDLE_TIMEOUT'] }} > 0) {
+    function idleAutologout() {
+        location.href = "{{ url_for('logout') }}";
+    }
+    function resetIdleTimer() {
+        clearTimeout(idleTimer);
+        idleTimer = setTimeout(idleAutologout, {{ config['IDLE_TIMEOUT'] }} * 1000);
+    }
+    window.addEventListener('keydown', resetIdleTimer, {passive: true});
+    window.addEventListener('mousedown', resetIdleTimer, {passive: true});
+    window.addEventListener('wheel', resetIdleTimer, {passive: true});
+    idleTimer = setTimeout(idleAutologout, {{ config['IDLE_TIMEOUT'] }} * 1000);
+  }
+</script>
+
+<style type="text/css">
+<!--
+  .icon-rotate {
+    animation: 2s infinite linear rotation;
+  }
+
+  @keyframes rotation {
+    from {transform: rotate(0deg);}
+    to   {transform: rotate(360deg);}
+  }
+-->
+</style>
+{% endblock %}
+
 {%- block head %}
   <title>{% block title %}{% endblock title %} - QWC Admin</title>
 
@@ -24,6 +73,9 @@
         <li><a href="{{ url_for('roles') }}">Roles</a></li>
         <li><a href="{{ url_for('resources') }}">Resources</a></li>
         <li><a href="{{ url_for('permissions') }}">Permissions</a></li>
+        {% for plugin in config['PLUGINS'] %}
+            <li><a href="{{ url_for(plugin.id) }}">{{ plugin.name }}</a></li>
+        {% endfor %}
         {% if config['QWC_GROUP_REGISTRATION_ENABLED'] %}
         <li class="dropdown">
           <a href="#" class="dropdown-toggle" data-toggle="dropdown" role="button" aria-haspopup="true" aria-expanded="false">Registration <span class="caret"></span></a>
@@ -32,6 +84,7 @@
             <li><a href="{{ url_for('registration_requests') }}">Registration requests</a></li>
           </ul>
         </li>
+        <li><a href="{{ url_for('logout') }}">Logout</a></li>
         {% endif %}
       </ul>
     </div>

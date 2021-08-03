@@ -1,3 +1,6 @@
+[![](https://github.com/qwc-services/qwc-admin-gui/workflows/build/badge.svg)](https://github.com/qwc-services/qwc-admin-gui/actions)
+[![](https://img.shields.io/docker/pulls/sourcepole/qwc-admin-gui)](https://hub.docker.com/r/sourcepole/qwc-admin-gui)
+
 QWC Admin GUI
 =============
 
@@ -10,12 +13,34 @@ GUI for administration of QWC Services.
 **Note:** requires a QWC ConfigDB
 
 
-Setup
------
+Configuration
+-------------
 
-Uses PostgreSQL connection service `qwc_configdb` (ConfigDB).
+The static config files are stored as JSON files in `$CONFIG_PATH` with subdirectories for each tenant,
+e.g. `$CONFIG_PATH/default/*.json`. The default tenant name is `default`.
 
-Setup PostgreSQL connection service file `~/.pg_service.conf`:
+### Admin Gui Service config
+
+* [JSON schema](schemas/qwc-admin-gui.json)
+* File location: `$CONFIG_PATH/<tenant>/adminGuiConfig.json`
+
+Example:
+```json
+{
+  "$schema": "https://raw.githubusercontent.com/qwc-services/qwc-admin-gui/master/schemas/qwc-admin-gui.json",
+  "service": "admin-gui",
+  "config": {
+    "db_url": "postgresql:///?service=qwc_configdb",
+    "config_generator_service_url": "http://qwc-config-service:9090",
+    "totp_enabled": false,
+    "user_info_fields": [],
+    "proxy_url_whitelist": [],
+    "proxy_timeout": 60
+  }
+}
+```
+
+To connect with the demo database, the following `~/.pg_service.conf` entry is expected:
 
 ```
 [qwc_configdb]
@@ -27,12 +52,16 @@ password=qwc_admin
 sslmode=disable
 ```
 
+Set the `GROUP_REGISTRATION_ENABLED` environment variable to `False` to disable registrable groups and group registration requests, if not using the [Registration GUI](https://github.com/qwc-services/qwc-registration-gui) (default: `True`).
 
-Configuration
--------------
+To automatically logout from the admin gui after a period of inactivity, set the `IDLE_TIMEOUT` environment variable to the desired period, in seconds (default: `0`, i.e. disabled).
+
+Set `totp_enabled` to `true` to show the TOTP fields in the user form, if two factor authentication is enabled in the [DB-Auth service](https://github.com/qwc-services/qwc-db-auth) (default: `false`).
+
+### Additional user fields
 
 Additional user fields are saved in the table `qwc_config.user_infos` with a a one-to-one relation to `qwc_config.users` via the `user_id` foreign key.
-To add custom user fields, add new columns to your `qwc_config.user_infos` table and set your `USER_INFO_FIELDS` to a JSON with the following structure:
+To add custom user fields, add new columns to your `qwc_config.user_infos` table and set your `user_info_fields` to a JSON with the following structure:
 
 ```json
 [
@@ -57,13 +86,8 @@ ALTER TABLE qwc_config.user_infos ADD COLUMN first_name character varying NOT NU
 
 ```bash
 # set user info fields config
-USER_INFO_FIELDS='[{"title": "Surname", "name": "surname", "type": "text", "required": true}, {"title": "First name", "name": "first_name", "type": "text", "required": true}]'
+"user_info_fields": [{"title": "Surname", "name": "surname", "type": "text", "required": true}, {"title": "First name", "name": "first_name", "type": "text", "required": true}]
 ```
-
-Set the `TOTP_ENABLED` environment variable to `True` to show the TOTP fields in the user form, if two factor authentication is enabled in the [DB-Auth service](https://github.com/qwc-services/qwc-db-auth) (default: `False`).
-
-Set the `GROUP_REGISTRATION_ENABLED` environment variable to `False` to disable registrable groups and group registration requests, if not using the [Registration GUI](https://github.com/qwc-services/qwc-registration-gui) (default: `True`).
-
 
 ### Mailer
 
@@ -82,6 +106,16 @@ Set the `GROUP_REGISTRATION_ENABLED` environment variable to `False` to disable 
 
 In addition the standard Flask `TESTING` configuration option is used by Flask-Mail in unit tests.
 
+### Proxy to internal services
+
+The route `/proxy?url=http://example.com/path?a=1` serves as a proxy for calling whitelisted internal services. This can be used e.g. to call other internal services from custom pages in the Admin GUI, without having to expose those services externally.
+
+Set `proxy_url_whitelist` to a list of RegExes for whitelisted URLs (default: `[]`), e.g.
+```json
+    ["<RegEx pattern for full URL from proxy request>", "^http://example.com/path\\?.*$"]
+```
+
+Set `proxy_timeout` to the timeout in seconds for proxy requests (default: `60`s).
 
 ### Translations
 
@@ -89,41 +123,55 @@ Translation strings are stored in a JSON file for each locale in `translations/<
 
 Set the `DEFAULT_LOCALE` environment variable to choose the locale for the user notification mails (default: `en`).
 
+### Plugins
 
-### Proxy to internal services
-
-The route `/proxy?url=http://example.com/path?a=1` serves as a proxy for calling whitelisted internal services. This can be used e.g. to call other internal services from custom pages in the Admin GUI, without having to expose those services externally.
-
-Set the `PROXY_URL_WHITELIST` environment variable to a JSON with a list of RegExes for whitelisted URLs (default: `[]`), e.g.
-```json
-    ["<RegEx pattern for full URL from proxy request>", "^http://example.com/path\\?.*$"]
-```
-
-Set the `PROXY_TIMEOUT` environment variable to the timeout in seconds for proxy requests (default: `60`s).
-
+The admin gui is extendable through plugins, which reside in the `plugins` folder. To enable them, list them in `plugins` in the admin gui configuration. See the JSON schema for details, and for configuration parameters which may be required by plugins shipped by default with `qwc-admin-gui`.
 
 Usage
 -----
-
-Set the `USER_INFO_FIELDS` environment variable to your custom user info fields JSON (default: `[]`.
 
 Base URL:
 
     http://localhost:5031/
 
+### Default login
+
+username: admin
+password: admin
+
+
+Docker usage
+------------
+
+To run this docker image you will need a configuration database. For testing purposes you can use the demo DB.
+
+The following steps explain how to download the demo DB docker image and how to run the `qwc-admin-gui` service with `docker-compose`.
+
+**Step 1: Clone qwc-docker**
+
+    git clone https://github.com/qwc-services/qwc-docker
+    cd qwc-docker
+
+**Step 2: Create docker-compose.yml file**
+
+    cp docker-compose-example.yml docker-compose.yml
+
+**Step 3: Set flask debug mode to true**
+
+For the QWC Admin GUI to work without login you will have to add the following `env` variable:
+
+    FLASK_DEBUG=1
+
+**Step 4: Start docker containers**
+
+    docker-compose up qwc-admin-gui
+
+For more information please visit: https://github.com/qwc-services/qwc-docker
 
 Development
 -----------
 
-Install Python module for PostgreSQL:
-
-    apt-get install python3-psycopg2
-
 Create a virtual environment:
-
-    virtualenv --python=/usr/bin/python3 --system-site-packages .venv
-
-Without system packages:
 
     virtualenv --python=/usr/bin/python3 .venv
 
@@ -135,6 +183,14 @@ Install requirements:
 
     pip install -r requirements.txt
 
+Set the `CONFIG_PATH` environment variable to the path containing the service config and permission files when starting this service (default: `config`).
+
+    export CONFIG_PATH=../qwc-docker/demo-config
+
+Configure environment:
+
+    echo FLASK_ENV=development >.flaskenv
+
 Start local service:
 
-    MAIL_SUPPRESS_SEND=True MAIL_DEFAULT_SENDER=from@example.com python server.py
+     python server.py

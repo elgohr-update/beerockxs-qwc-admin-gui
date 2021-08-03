@@ -1,16 +1,21 @@
+from datetime import datetime
 import logging
 import os
 import re
 import requests
+import urllib.parse
+import importlib
 
 from flask import abort, Flask, json, redirect, render_template, request, \
-    Response, stream_with_context
+    Response, stream_with_context, jsonify, send_from_directory
 from flask_bootstrap import Bootstrap
 from flask_wtf.csrf import CSRFProtect
 from flask_jwt_extended import jwt_optional, get_jwt_identity
 from flask_mail import Mail
 
-from qwc_config_db.config_models import ConfigModels
+from qwc_services_core.tenant_handler import TenantHandler, \
+    TenantPrefixMiddleware, TenantSessionInterface
+from qwc_services_core.runtime_config import RuntimeConfig
 from qwc_services_core.database import DatabaseEngine
 from qwc_services_core.jwt import jwt_manager
 from access_control import AccessControl
@@ -19,25 +24,23 @@ from controllers import UsersController, GroupsController, RolesController, \
     RegistrationRequestsController
 
 
-# load ORM models for ConfigDB
-db_engine = DatabaseEngine()
-config_models = ConfigModels(db_engine)
+AUTH_PATH = os.environ.get('AUTH_PATH', '/auth')
+SKIP_LOGIN = os.environ.get('SKIP_LOGIN', False)
 
 # Flask application
-app = Flask(__name__)
-app.secret_key = os.environ.get(
-    'JWT_SECRET_KEY',
-    'CHANGE-ME-8JGL6Kc9UA69p6E88JGL6Kc9UA69p6E8')
+app = Flask(__name__, template_folder='.')
+
+jwt = jwt_manager(app)
+app.secret_key = app.config['JWT_SECRET_KEY']
+
 app.config['QWC_GROUP_REGISTRATION_ENABLED'] = os.environ.get(
     'GROUP_REGISTRATION_ENABLED', 'True') == 'True'
+app.config['IDLE_TIMEOUT'] = os.environ.get('IDLE_TIMEOUT', 0)
 
 # enable CSRF protection
 CSRFProtect(app)
 # load Bootstrap extension
 Bootstrap(app)
-
-# Setup the Flask-JWT-Extended extension
-jwt = jwt_manager(app)
 
 
 # Setup mailer
@@ -76,16 +79,6 @@ except Exception as e:
         % (locale, path, e)
     )
 
-# settings for proxy to internal services
-PROXY_TIMEOUT = int(os.environ.get('PROXY_TIMEOUT', 60))
-try:
-    PROXY_URL_WHITELIST = json.loads(
-        os.environ.get('PROXY_URL_WHITELIST', '[]')
-    )
-except Exception as e:
-    app.logger.error("Could not load PROXY_URL_WHITELIST:\n%s" % e)
-    PROXY_URL_WHITELIST = []
-
 
 # Setup translation helper
 @app.template_filter('i18n')
@@ -117,17 +110,75 @@ def i18n(value, locale=DEFAULT_LOCALE):
     return lookup
 
 
-# create controllers (including their routes)
-UsersController(app, config_models)
-GroupsController(app, config_models)
-RolesController(app, config_models)
-ResourcesController(app, config_models)
-PermissionsController(app, config_models)
-if app.config.get('QWC_GROUP_REGISTRATION_ENABLED'):
-    RegistrableGroupsController(app, config_models)
-    RegistrationRequestsController(app, config_models, i18n, mail)
+tenant_handler = TenantHandler(app.logger)
+db_engine = DatabaseEngine()
 
-access_control = AccessControl(config_models, app.logger)
+
+class TenantConfigHandler:
+    def __init__(self, tenant, db_engine, logger):
+        self.tenant = tenant
+        self._db_engine = db_engine
+        self.logger = logger
+
+        config_handler = RuntimeConfig("adminGui", logger)
+        self._config = config_handler.tenant_config(tenant)
+
+    def config(self):
+        return self._config
+
+    def db_engine(self):
+        return self._db_engine
+
+    def conn_str(self):
+        return self._config.get(
+            'db_url', 'postgresql:///?service=qwc_configdb')
+
+
+def handler():
+    tenant = tenant_handler.tenant()
+    handler = tenant_handler.handler('admin-gui', 'handler', tenant)
+    if handler is None:
+        handler = tenant_handler.register_handler(
+            'handler', tenant,
+            TenantConfigHandler(tenant, db_engine, app.logger))
+    return handler
+
+
+app.wsgi_app = TenantPrefixMiddleware(app.wsgi_app)
+app.session_interface = TenantSessionInterface(os.environ)
+
+
+def auth_path_prefix():
+    # e.g. /admin/org1/auth
+    return app.session_interface.tenant_path_prefix().rstrip("/") + "/" + AUTH_PATH.lstrip("/")
+
+
+# create controllers (including their routes)
+UsersController(app, handler)
+GroupsController(app, handler)
+RolesController(app, handler)
+ResourcesController(app, handler)
+PermissionsController(app, handler)
+if app.config.get('QWC_GROUP_REGISTRATION_ENABLED'):
+    RegistrableGroupsController(app, handler)
+    RegistrationRequestsController(app, handler, i18n, mail)
+
+access_control = AccessControl(handler, app.logger)
+
+plugins_loaded = False
+@app.before_first_request
+def load_plugins():
+    global plugins_loaded
+    if not plugins_loaded:
+        plugins_loaded = True
+        app.config['PLUGINS'] = []
+        for plugin in handler().config().get("plugins", []):
+            try:
+                mod = importlib.import_module("plugins." + plugin)
+                mod.load_plugin(app, handler)
+                app.config['PLUGINS'].append({"id": plugin, "name": mod.name})
+            except Exception as e:
+                app.logger.warning("Could not load plugin %s: %s" % (plugin, str(e)))
 
 
 @app.before_request
@@ -136,21 +187,53 @@ def assert_admin_role():
     identity = get_jwt_identity()
     app.logger.debug("Access with identity %s" % identity)
     if not access_control.is_admin(identity):
-        app.logger.info("Access denied for user %s" % identity)
-        if app.debug:
-            pass  # Allow access in debug mode
+        if SKIP_LOGIN:
+            app.logger.info("Login skipped for user %s" % identity)
+            pass  # Allow access without login
         else:
+            app.logger.info("Access denied for user %s" % identity)
+            prefix = auth_path_prefix()
             if identity:
                 # Already logged in, but not with admin role
-                return redirect('/auth/logout?url=%s' % request.url)
+                return redirect(prefix + '/logout?url=%s' % request.url)
             else:
-                return redirect('/auth/login?url=%s' % request.url)
+                return redirect(prefix + '/login?url=%s' % request.url)
 
+
+@app.route('/logout')
+def logout():
+    prefix = auth_path_prefix()
+    return redirect(prefix + '/logout?url=%s' % request.url.replace(
+        "/logout", ""))
 
 # routes
 @app.route('/')
 def home():
-    return render_template('home.html')
+    return render_template('templates/home.html')
+
+
+@app.route('/pluginstatic/<plugin>/<filename>')
+def plugin_static(plugin, filename):
+    """ Return assets from plugins """
+    return send_from_directory(
+        os.path.join("plugins", plugin, "static"), filename)
+
+
+@app.route('/generate_configs', methods=['POST'])
+def generate_configs():
+    """ Generate service configurations """
+
+    current_handler = handler()
+    config_generator_url = current_handler.config().get(
+        "config_generator_service_url",
+        "http://qwc-config-service:9090")
+
+    response = requests.post(
+        urllib.parse.urljoin(
+            config_generator_url,
+            "generate_configs?tenant=" + current_handler.tenant))
+
+    return (response.text, response.status_code)
 
 
 @app.route("/proxy", methods=['GET', 'POST', 'PUT', 'DELETE'])
@@ -161,6 +244,10 @@ def proxy():
         url: Target URL
     """
     url = request.args.get('url')
+    current_handler = handler()
+
+    PROXY_URL_WHITELIST = current_handler.config().get(
+        "proxy_url_whitelist", [])
 
     # check if URL is in whitelist
     url_permitted = False
@@ -171,6 +258,10 @@ def proxy():
     if not url_permitted:
         app.logger.info("Proxy forbidden for URL '%s'" % url)
         abort(403)
+
+    # settings for proxy to internal services
+    PROXY_TIMEOUT = current_handler.config().get(
+        "proxy_timeout", 60)
 
     # forward request
     if request.method == 'GET':
@@ -193,8 +284,21 @@ def proxy():
     return response
 
 
+""" readyness probe endpoint """
+@app.route("/ready", methods=['GET'])
+def ready():
+    return jsonify({"status": "OK"})
+
+
+""" liveness probe endpoint """
+@app.route("/healthz", methods=['GET'])
+def healthz():
+    return jsonify({"status": "OK"})
+
+
 # local webserver
 if __name__ == '__main__':
     print("Starting QWC Admin GUI...")
     app.logger.setLevel(logging.DEBUG)
+    SKIP_LOGIN = True
     app.run(host='localhost', port=5031, debug=True)
